@@ -71,7 +71,46 @@ jobs:
             --output /dev/null
 
           echo "Repository configuration and connectivity check passed."
+        - name: Fix split metadata API compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
 
+          source = Path(os.environ["PROJECT_DIR"]) / "app/src/main/java/org/pococ3/blockstart/MainActivity.java"
+          content = source.read_text(encoding="utf-8")
+
+          old = (
+              "            ApplicationInfo appInfo = info.applicationInfo;\n"
+              "            int splitCount = appInfo == null || appInfo.splitNames == null\n"
+              "                    ? 0 : appInfo.splitNames.length;\n"
+              "            if (splitCount == 0 && appInfo != null && appInfo.splitSourceDirs != null) {\n"
+              "                splitCount = appInfo.splitSourceDirs.length;\n"
+              "            }\n"
+          )
+
+          new = (
+              "            ApplicationInfo appInfo = info.applicationInfo;\n"
+              "            int splitCount = 0;\n"
+              "            if (appInfo != null) {\n"
+              "                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O\n"
+              "                        && appInfo.splitNames != null) {\n"
+              "                    splitCount = appInfo.splitNames.length;\n"
+              "                }\n"
+              "                if (splitCount == 0 && appInfo.splitSourceDirs != null) {\n"
+              "                    splitCount = appInfo.splitSourceDirs.length;\n"
+              "                }\n"
+              "            }\n"
+          )
+
+          if content.count(old) != 1:
+              raise SystemExit("Expected source block not found exactly once. No changes made.")
+
+          source.write_text(content.replace(old, new, 1), encoding="utf-8")
+          print("Successfully patched split metadata API compatibility.")
+          PY
       - name: Set up JDK 17
         uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
