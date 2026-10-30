@@ -71,7 +71,7 @@ jobs:
             --output /dev/null
 
           echo "Repository configuration and connectivity check passed."
-        - name: Fix split metadata API compatibility
+      - name: Fix split metadata API compatibility
         shell: bash
         run: |
           set -euo pipefail
