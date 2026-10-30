@@ -34,6 +34,43 @@ jobs:
           test -n "$PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+      - name: Configure Maven Central repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > "$PROJECT_DIR/settings.gradle" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  maven {
+                      url = uri("https://repo1.maven.org/maven2/")
+                  }
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  maven {
+                      url = uri("https://repo1.maven.org/maven2/")
+                  }
+              }
+          }
+
+          rootProject.name = 'BlockStart'
+          include ':app'
+          EOF
+
+          echo "Checking Maven Central dependency access..."
+          curl --fail --location --silent --show-error \
+            --retry 3 --retry-all-errors --retry-delay 5 \
+            "https://repo1.maven.org/maven2/com/google/dagger/dagger/2.28.3/dagger-2.28.3.pom" \
+            --output /dev/null
+
+          echo "Repository configuration and connectivity check passed."
 
       - name: Set up JDK 17
         uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
