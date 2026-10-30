@@ -1,0 +1,130 @@
+name: Build BlockStart Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "BlockStart-Android-Source.zip"
+      - ".github/workflows/build-blockstart.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blockstart-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Test, lint, build and validate APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Extract complete Android project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s BlockStart-Android-Source.zip
+          mkdir -p "$RUNNER_TEMP/blockstart-src"
+          unzip -q BlockStart-Android-Source.zip -d "$RUNNER_TEMP/blockstart-src"
+          PROJECT_DIR="$(find "$RUNNER_TEMP/blockstart-src" -type f -name settings.gradle -print -quit | xargs -r dirname)"
+          test -n "$PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+
+      - name: Install pinned Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.13'
+
+      - name: Verify Java and Gradle
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          java -version
+          gradle --version
+
+      - name: Run unit tests, Android lint and debug build
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle --no-daemon --stacktrace clean testDebugUnitTest lintDebug assembleDebug
+
+      - name: Validate APK metadata, signature, native libraries and SHA-256
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+          "$BUILD_TOOLS/aapt" dump badging "$APK" | tee app/build/outputs/apk/debug/apk-badging.txt
+          grep -F "package: name='org.pococ3.blockstart' versionCode='1' versionName='1.0.0'" app/build/outputs/apk/debug/apk-badging.txt
+          grep -F "sdkVersion:'23'" app/build/outputs/apk/debug/apk-badging.txt
+          grep -F "targetSdkVersion:'35'" app/build/outputs/apk/debug/apk-badging.txt
+
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK" | tee app/build/outputs/apk/debug/apk-signature.txt
+          grep -F "Verifies" app/build/outputs/apk/debug/apk-signature.txt
+
+          mkdir -p app/build/outputs/apk/debug/native-inspection
+          mapfile -t SO_FILES < <(unzip -Z1 "$APK" | grep -E '^lib/[^/]+/[^/]+\.so$' || true)
+          if (( ${#SO_FILES[@]} == 0 )); then
+            echo "No native shared libraries are packaged (expected: Java-only launcher)." | tee app/build/outputs/apk/debug/native-inspection/report.txt
+          else
+            : > app/build/outputs/apk/debug/native-inspection/report.txt
+            while IFS= read -r entry; do
+              [[ -n "$entry" ]] || continue
+              abi="$(cut -d/ -f2 <<< "$entry")"
+              if [[ "$abi" != "armeabi-v7a" ]]; then
+                echo "Unexpected ABI directory: $entry" | tee -a app/build/outputs/apk/debug/native-inspection/report.txt
+                exit 1
+              fi
+              unzip -p "$APK" "$entry" > "app/build/outputs/apk/debug/native-inspection/$(basename "$entry")"
+              readelf -h "app/build/outputs/apk/debug/native-inspection/$(basename "$entry")" | tee -a app/build/outputs/apk/debug/native-inspection/report.txt
+              readelf -h "app/build/outputs/apk/debug/native-inspection/$(basename "$entry")" | grep -Eq 'Machine:[[:space:]]+ARM'
+              echo "$entry : ELF machine ARM" | tee -a app/build/outputs/apk/debug/native-inspection/report.txt
+            done < <(printf '%s\n' "${SO_FILES[@]}")
+          fi
+
+          sha256sum "$APK" | tee "$APK.sha256"
+          {
+            echo "APK=$APK"
+            echo "Application ID=org.pococ3.blockstart"
+            echo "Version=1.0.0 (1)"
+            echo "minSdk=23"
+            echo "targetSdk=35"
+            echo "Signature=verified with apksigner"
+            echo "Native shared libraries=${#SO_FILES[@]}"
+          } | tee app/build/outputs/apk/debug/validation-summary.txt
+
+      - name: Upload installable debug APK and validation reports
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: BlockStart-debug-apk
+          if-no-files-found: error
+          compression-level: 0
+          path: |
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk.sha256
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/apk-badging.txt
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/apk-signature.txt
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/native-inspection/report.txt
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/validation-summary.txt
+            ${{ env.PROJECT_DIR }}/app/build/reports/tests/testDebugUnitTest/**
+            ${{ env.PROJECT_DIR }}/app/build/reports/lint-results-debug.html
